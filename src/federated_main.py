@@ -98,16 +98,19 @@ if __name__ == '__main__':
             aligned_local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx], logger=logger)            
             w, loss = aligned_local_model.update_weights(
-                model=local_models[i], all_models=local_models, global_model=global_model
+                model=local_models[i], idx=i, all_models=local_models, global_model=global_model
             )
+            aligned_weights.append(copy.deepcopy(w))
+            aligned_losses.append(copy.deepcopy(loss))
+
 
         # update global weights
-        global_weights = average_weights(local_weights)
+        global_weights = average_weights(aligned_weights)
 
         # update global weights
         global_model.load_state_dict(global_weights)
 
-        loss_avg = sum(local_losses) / len(local_losses)
+        loss_avg = sum(aligned_losses) / len(aligned_losses)
         train_loss.append(loss_avg)
 
         # Calculate avg training accuracy over all users at every epoch

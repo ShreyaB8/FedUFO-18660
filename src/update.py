@@ -148,7 +148,7 @@ class LocalUpdate(object):
                 total_loss.backward()
 
 
-        return model, model.state_dict(), sum(epoch_loss) / len(epoch_loss)
+        return model.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
 
     def inference(self, model):
