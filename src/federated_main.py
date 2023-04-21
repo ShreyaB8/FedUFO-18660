@@ -11,11 +11,12 @@ import numpy as np
 from tqdm import tqdm
 
 import torch
+from torch import nn
 from tensorboardX import SummaryWriter
 
 from options import args_parser
 from update import LocalUpdate, test_inference
-from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar, CNNMnistSplit
+from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar, CNNMnistSplit, UFODiscriminator
 from utils import get_dataset, average_weights, exp_details
 
 
@@ -65,6 +66,9 @@ if __name__ == '__main__':
     # copy weights
     global_weights = global_model.state_dict()
 
+    # init discriminator
+    disc = UFODiscriminator(args)
+
     # Training
     train_loss, train_accuracy = [], []
     val_acc_list, net_list = [], []
@@ -73,7 +77,7 @@ if __name__ == '__main__':
     val_loss_pre, counter = 0, 0
 
     for epoch in tqdm(range(args.epochs)):
-        local_weights, local_losses = [], []
+        local_weights, local_losses, local_models, aligned_weights, aligned_losses = [], [], [], [], []
         print(f'\n | Global Training Round : {epoch+1} |\n')
 
         global_model.train()
@@ -83,10 +87,19 @@ if __name__ == '__main__':
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx], logger=logger)
-            w, loss = local_model.update_weights(
+            model, w, loss = local_model.update_weights(
                 model=copy.deepcopy(global_model), global_round=epoch)
             local_weights.append(copy.deepcopy(w))
             local_losses.append(copy.deepcopy(loss))
+            local_models.append(model)
+
+        # Alignment
+        for i, idx in enumerate(idxs_users):
+            aligned_local_model = LocalUpdate(args=args, dataset=train_dataset,
+                                      idxs=user_groups[idx], logger=logger)            
+            w, loss = aligned_local_model.update_weights(
+                model=local_models[i], all_models=local_models, global_model=global_model
+            )
 
         # update global weights
         global_weights = average_weights(local_weights)

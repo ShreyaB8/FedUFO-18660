@@ -67,7 +67,24 @@ class CNNMnistSplit(nn.Module):
         features = x.view(-1, x.shape[1]*x.shape[2]*x.shape[3])
         return features
  
+class UFODiscriminator(nn.Module):
+    def __init__(self, args):
+        super(UFODiscriminator, self).__init__()
+        self.fc1 = nn.Linear(320, 200)
+        self.fc2 = nn.Linear(200, args.num_users)
 
+        self.relu = nn.ReLU()
+        self.softmax = nn.Softmax()
+
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.softmax(self.fc2(x))
+        return x
+
+    def forward_train(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
 
 class CNNFashion_Mnist(nn.Module):
     def __init__(self, args):
