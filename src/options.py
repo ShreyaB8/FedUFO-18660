@@ -23,6 +23,9 @@ def args_parser():
                         help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.5,
                         help='SGD momentum (default: 0.5)')
+    parser.add_argument('--gpu_id', type=int, default=0, 
+                        help='GPU ID, if not provided, CPU will be used')
+
 
     # model arguments
     parser.add_argument('--model', type=str, default='mlp', help='model name')
@@ -41,6 +44,7 @@ def args_parser():
     parser.add_argument('--max_pool', type=str, default='True',
                         help="Whether use max pooling rather than \
                         strided convolutions")
+    
 
     # other arguments
     parser.add_argument('--dataset', type=str, default='mnist', help="name \
