@@ -26,6 +26,8 @@ if __name__ == '__main__':
     # define paths
     path_project = os.path.abspath('..')
     logger = SummaryWriter('../logs')
+    writer = SummaryWriter()
+
 
     args = args_parser()
     exp_details(args)
@@ -94,15 +96,20 @@ if __name__ == '__main__':
             local_models.append(model)
 
         # Alignment
+        disc_losses = []
         for i, idx in enumerate(idxs_users):
             aligned_local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx], logger=logger)            
-            w, loss = aligned_local_model.update_weights(
-                model=local_models[i], idx=i, all_models=local_models, global_model=global_model
+            w, loss, disc_loss = aligned_local_model.update_weights_align(
+                model=local_models[i], idx=i, all_models=local_models, global_model=global_model,
+                disc=disc, global_round=epoch, writer=writer
             )
             aligned_weights.append(copy.deepcopy(w))
             aligned_losses.append(copy.deepcopy(loss))
+            disc_losses.append(disc_loss)  # Store the discriminator loss
 
+        # After the training process, you can log the discriminator's losses or plot them if needed.
+        print('Average Discriminator Loss: {:.4f}'.format(np.mean(disc_losses)))
 
         # update global weights
         global_weights = average_weights(aligned_weights)
@@ -138,7 +145,7 @@ if __name__ == '__main__':
     print("|---- Test Accuracy: {:.2f}%".format(100*test_acc))
 
     # Saving the objects train_loss and train_accuracy:
-    file_name = '../save/objects/{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}].pkl'.\
+    file_name = 'save/objects/{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}].pkl'.\
         format(args.dataset, args.model, args.epochs, args.frac, args.iid,
                args.local_ep, args.local_bs)
 
@@ -148,26 +155,26 @@ if __name__ == '__main__':
     print('\n Total Run Time: {0:0.4f}'.format(time.time()-start_time))
 
     # PLOTTING (optional)
-    # import matplotlib
-    # import matplotlib.pyplot as plt
-    # matplotlib.use('Agg')
+    import matplotlib
+    import matplotlib.pyplot as plt
+    matplotlib.use('Agg')
 
     # Plot Loss curve
-    # plt.figure()
-    # plt.title('Training Loss vs Communication rounds')
-    # plt.plot(range(len(train_loss)), train_loss, color='r')
-    # plt.ylabel('Training loss')
-    # plt.xlabel('Communication Rounds')
-    # plt.savefig('../save/fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_loss.png'.
-    #             format(args.dataset, args.model, args.epochs, args.frac,
-    #                    args.iid, args.local_ep, args.local_bs))
+    plt.figure()
+    plt.title('Training Loss vs Communication rounds')
+    plt.plot(range(len(train_loss)), train_loss, color='r')
+    plt.ylabel('Training loss')
+    plt.xlabel('Communication Rounds')
+    plt.savefig('save/fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_loss.png'.
+                format(args.dataset, args.model, args.epochs, args.frac,
+                       args.iid, args.local_ep, args.local_bs))
     #
     # # Plot Average Accuracy vs Communication rounds
-    # plt.figure()
-    # plt.title('Average Accuracy vs Communication rounds')
-    # plt.plot(range(len(train_accuracy)), train_accuracy, color='k')
-    # plt.ylabel('Average Accuracy')
-    # plt.xlabel('Communication Rounds')
-    # plt.savefig('../save/fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_acc.png'.
-    #             format(args.dataset, args.model, args.epochs, args.frac,
-    #                    args.iid, args.local_ep, args.local_bs))
+    plt.figure()
+    plt.title('Average Accuracy vs Communication rounds')
+    plt.plot(range(len(train_accuracy)), train_accuracy, color='k')
+    plt.ylabel('Average Accuracy')
+    plt.xlabel('Communication Rounds')
+    plt.savefig('save/fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_acc.png'.
+                format(args.dataset, args.model, args.epochs, args.frac,
+                       args.iid, args.local_ep, args.local_bs))

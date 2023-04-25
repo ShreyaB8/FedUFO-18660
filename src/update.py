@@ -7,6 +7,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 
+
 class DatasetSplit(Dataset):
     """An abstract Dataset class wrapped around Pytorch Dataset class.
     """
@@ -86,7 +87,7 @@ class LocalUpdate(object):
 
         return model, model.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
-    def update_weights_align(self, model, idx, all_models, global_model, disc):
+    def update_weights_align(self, model, idx, all_models, global_model, disc, global_round, writer):
         for local_model in all_models:
             local_model.eval()
         disc.eval()
@@ -103,7 +104,9 @@ class LocalUpdate(object):
                                          weight_decay=1e-4)
 
         cross_entropy = nn.CrossEntropyLoss()
-
+        
+        
+        lambda_val = 0.1 # to control the impact of the uniformity loss
         for iter in range(self.args.local_ep):
             batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.trainloader):
@@ -115,9 +118,18 @@ class LocalUpdate(object):
 
                 model.zero_grad()
                 log_probs = model(images)
-                loss = self.criterion(log_probs, labels) + l_uniform
+                # loss = self.criterion(log_probs, labels) + l_uniform
+                loss = self.criterion(log_probs, labels) + lambda_val * l_uniform
                 loss.backward()
+                
+                # Print gradients
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        # print(f'Gradients of {name}: {param.grad}')
+                        writer.add_histogram(f'{name}.grad', param.grad, global_round)
+
                 optimizer.step()
+
 
                 if self.args.verbose and (batch_idx % 10 == 0):
                     print('| Global Round : {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
@@ -130,6 +142,7 @@ class LocalUpdate(object):
 
         disc.train()
         model.eval()
+        disc_loss = 0
         for iter in range(self.args.local_ep):
             batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.trainloader):
@@ -145,10 +158,14 @@ class LocalUpdate(object):
                 d_tilda_loss = d_tilda_loss / (len(all_models)-1)
 
                 total_loss = -torch.log(d_hat[idx]) - d_tilda_loss
-                total_loss.backward()
+                scalar_total_loss = total_loss.mean()  # or total_loss.sum()
+                scalar_total_loss.backward()
+                # total_loss.backward()
+                disc_loss += scalar_total_loss.item()
 
 
-        return model.state_dict(), sum(epoch_loss) / len(epoch_loss)
+        return model.state_dict(), sum(epoch_loss) / len(epoch_loss), disc_loss / len(self.trainloader)
+
 
 
     def inference(self, model):
