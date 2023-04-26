@@ -5,6 +5,7 @@
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+import argparse
 
 
 
@@ -165,20 +166,21 @@ class LocalUpdate(object):
                 f_i = global_model.get_features(images)
                 d_hat = disc(f_i) 
 
-                d_tilda_loss = torch.zeros_like(d_hat)
+                d_tilda_loss = torch.zeros_like(d_hat[:,0])
                 for i, local_model in enumerate(all_models):
-                    d_tilda_loss += torch.log(disc(local_model.get_features(images))[i])
+                    d_tilda_loss += torch.log(disc(local_model.get_features(images))[:,i])
 
                 d_tilda_loss = d_tilda_loss / (len(all_models)-1)
-
-                total_loss = -torch.log(d_hat[idx]) - d_tilda_loss
+                # print(d_tilda_loss.shape, d_hat[idx].shape)
+                total_loss = -torch.log(d_hat[:,idx]) - d_tilda_loss
                 disc.zero_grad()
-                total_loss.backward()
+                total_loss.mean().backward()
                 optimizer.step()
-                scalar_total_loss = total_loss.mean()  # or total_loss.sum()
-                scalar_total_loss.backward()
+                # scalar_total_loss = total_loss.mean()  # or total_loss.sum()
+                # scalar_total_loss.backward()
                 # total_loss.backward()
-                disc_loss += scalar_total_loss.item()
+                # disc_loss += scalar_total_loss.item()
+                disc_loss += total_loss.mean().item()
 
         
         kl_loss = nn.KLDivLoss(reduction="batchmean")
@@ -191,13 +193,13 @@ class LocalUpdate(object):
                 images, labels = images.to(self.device), labels.to(self.device)
                 model.zero_grad()
 
-                y_cgr = torch.zeros_like(labels)
+                y_cgr = torch.zeros(10,10)
                 for i, local_model in enumerate(all_models):
                     if i == idx:
                         continue
                     y_cgr += local_model(images)
-                y_cgr_softmax = nn.functional.softmax(y_cgr, dim=1) 
 
+                y_cgr_softmax = nn.functional.softmax(y_cgr, dim=1) 
 
                 
                 f_i = global_model.get_features(images)
@@ -210,7 +212,9 @@ class LocalUpdate(object):
                 loss_cgr = kl_loss(log_probs, y_cgr_softmax)
                 loss_cgl = kl_loss_log(log_probs, gl_pred)
                 loss_comb = loss + l_uniform + loss_cgr + self.lambda_cgl * loss_cgl
+                print(f"loss: {loss.item()}, l_uniform: {l_uniform.item()}, loss_cgr: {loss_cgr.item()}, loss_cgl: {loss_cgl.item()}, loss_comb: {loss_comb.item()}")
                 loss_comb.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.args.clip_value)
                 optimizer.step()
 
         return model.state_dict(), sum(epoch_loss) / len(epoch_loss), disc_loss / len(self.trainloader)

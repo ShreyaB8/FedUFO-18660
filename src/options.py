@@ -25,6 +25,9 @@ def args_parser():
                         help='SGD momentum (default: 0.5)')
     parser.add_argument('--gpu_id', type=int, default=0, 
                         help='GPU ID, if not provided, CPU will be used')
+    parser.add_argument('--clip_value', type=float, default=1.0, 
+                        help='Gradient clipping value (default: 1.0)')
+
 
 
     # model arguments
