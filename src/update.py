@@ -32,6 +32,7 @@ class LocalUpdate(object):
         self.device = 'cuda' if args.gpu else 'cpu'
         # Default criterion set to NLL loss function
         self.criterion = nn.NLLLoss().to(self.device)
+        self.lambda_cgl = 2
 
     def train_val_test(self, dataset, idxs):
         """
@@ -108,15 +109,16 @@ class LocalUpdate(object):
             batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.trainloader):
                 images, labels = images.to(self.device), labels.to(self.device)
+                model.zero_grad()
                 
                 f_i = global_model.get_features(images)
                 d_hat = disc(f_i)
                 l_uniform = -torch.sum(torch.log(d_hat))
 
-                model.zero_grad()
                 log_probs = model(images)
-                loss = self.criterion(log_probs, labels) + l_uniform
-                loss.backward()
+                loss = self.criterion(log_probs, labels)
+                loss_comb = loss + l_uniform
+                loss_comb.backward()
                 optimizer.step()
 
                 if self.args.verbose and (batch_idx % 10 == 0):
@@ -128,12 +130,22 @@ class LocalUpdate(object):
                 batch_loss.append(loss.item())
             epoch_loss.append(sum(batch_loss)/len(batch_loss))
 
+        # Set optimizer for the local updates
+        if self.args.optimizer == 'sgd':
+            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
+                                        momentum=0.5)
+        elif self.args.optimizer == 'adam':
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
+                                         weight_decay=1e-4)
+
         disc.train()
         model.eval()
         for iter in range(self.args.local_ep):
             batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.trainloader):
                 images, labels = images.to(self.device), labels.to(self.device)
+                
+                disc.zero_grad()
                 
                 f_i = global_model.get_features(images)
                 d_hat = disc(f_i) 
@@ -145,8 +157,42 @@ class LocalUpdate(object):
                 d_tilda_loss = d_tilda_loss / (len(all_models)-1)
 
                 total_loss = -torch.log(d_hat[idx]) - d_tilda_loss
+                disc.zero_grad()
                 total_loss.backward()
+                optimizer.step()
 
+        
+        kl_loss = nn.KLDivLoss(reduction="batchmean")
+        kl_loss_log = nn.KLDivLoss(reduction="batchmean", log_target=True)
+        disc.eval()
+        model.train()
+        for iter in range(self.args.local_ep):
+            batch_loss = []
+            for batch_idx, (images, labels) in enumerate(self.trainloader):
+                images, labels = images.to(self.device), labels.to(self.device)
+                model.zero_grad()
+
+                y_cgr = torch.zeros_like(labels)
+                for i, local_model in enumerate(all_models):
+                    if i == idx:
+                        continue
+                    y_cgr += local_model(images)
+                y_cgr_softmax = nn.functional.softmax(y_cgr, dim=1) 
+
+
+                
+                f_i = global_model.get_features(images)
+                gl_pred = global_model(images)
+                d_hat = disc(f_i)
+                l_uniform = -torch.sum(torch.log(d_hat))
+
+                log_probs = model(images)
+                loss = self.criterion(log_probs, labels)
+                loss_cgr = kl_loss(log_probs, y_cgr_softmax)
+                loss_cgl = kl_loss_log(log_probs, gl_pred)
+                loss_comb = loss + l_uniform + loss_cgr + self.lambda_cgl * loss_cgl
+                loss_comb.backward()
+                optimizer.step()
 
         return model.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
