@@ -22,7 +22,7 @@ def args_parser():
     parser.add_argument('--lr', type=float, default=0.01,
                         help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.9,
-                        help='SGD momentum (default: 0.5)')
+                        help='SGD momentum (default: 0.9)')
     parser.add_argument('--gpu_id', type=int, default=0, 
                         help='GPU ID, if not provided, CPU will be used')
     parser.add_argument('--clip_value', type=float, default=1.0, 

@@ -223,7 +223,99 @@ class LocalUpdate(object):
 
         return model.state_dict(), sum(epoch_loss) / len(epoch_loss), disc_loss / len(self.trainloader)
 
-   
+    def update_weights_disc(self, model, idx, all_models, global_model, disc, global_round, writer):
+        for local_model in all_models:
+            local_model.eval()
+        disc.train()
+        model.eval()
+        epoch_loss = []
+
+        optimizer = torch.optim.Adam(disc.parameters(), lr=self.args.lr, weight_decay=1e-4)
+
+        for iter in range(self.args.local_ep):
+            batch_loss = []
+            for batch_idx, (images, labels) in enumerate(self.trainloader):
+                images, labels = images.to(self.device), labels.to(self.device)
+
+                disc.zero_grad()
+
+                f_i = global_model.get_features(images)
+                d_hat = disc(f_i)
+
+                d_tilda_loss = torch.zeros_like(d_hat[:,0])
+                for i, local_model in enumerate(all_models):
+                    if i == idx:
+                        continue
+                    d_tilda_loss += torch.log(disc(local_model.get_features(images))[:,i])
+
+                d_tilda_loss = d_tilda_loss / (len(all_models)-1)
+                total_loss = -torch.log(d_hat[:,idx]) - d_tilda_loss
+                disc.zero_grad()
+                total_loss.mean().backward()
+                optimizer.step()
+
+                disc_loss = total_loss.mean().item()
+                batch_loss.append(disc_loss)
+            epoch_loss.append(sum(batch_loss)/len(batch_loss))
+
+        return sum(epoch_loss) / len(epoch_loss)
+
+    
+    def update_weights_align_KL(self, model, idx, all_models, global_model, disc, global_round, writer):
+        for local_model in all_models:
+            local_model.eval()
+        disc.eval()
+        model.train()
+        global_model.eval()
+        epoch_loss = []
+
+        # Set optimizer for the local updates
+        if self.args.optimizer == 'sgd':
+            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
+                                        momentum=0.5, weight_decay=self.args.weight_decay)
+        elif self.args.optimizer == 'adam':
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
+                                        weight_decay=1e-4)
+
+        kl_loss = nn.KLDivLoss(reduction="batchmean")
+
+        for iter in range(self.args.local_ep):
+            batch_loss = []
+            for batch_idx, (images, labels) in enumerate(self.trainloader):
+                images, labels = images.to(self.device), labels.to(self.device)
+                model.zero_grad()
+
+                y_cgr = torch.zeros(10, 10)
+                for i, local_model in enumerate(all_models):
+                    if i == idx:
+                        continue
+                    y_cgr += local_model(images)
+
+                y_cgr_softmax = nn.functional.softmax(y_cgr, dim=1)
+
+                log_probs = model(images)
+                loss = kl_loss(log_probs, y_cgr_softmax)
+                loss.backward()
+
+                # Print gradients
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        # print(f'Gradients of {name}: {param.grad}')
+                        writer.add_histogram(f'{name}.grad', param.grad, global_round)
+
+                optimizer.step()
+
+                if self.args.verbose and (batch_idx % 10 == 0):
+                    print('| Global Round : {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                        global_round, iter, batch_idx * len(images),
+                        len(self.trainloader.dataset),
+                        100. * batch_idx / len(self.trainloader), loss.item()))
+                self.logger.add_scalar('loss', loss.item())
+                batch_loss.append(loss.item())
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        return model.state_dict(), sum(epoch_loss) / len(epoch_loss), None
+
 
     def inference(self, model):
         """ Returns the inference accuracy and loss.

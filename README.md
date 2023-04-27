@@ -38,7 +38,7 @@ Federated experiment involves training a global model using many local models.
 python src/federated_main.py --model=cnn --dataset=cifar --gpu=0 --iid=1 --epochs=10
 
 ## Currently working command
-python src/federated_main.py --model=cnn --dataset=mnist --gpu_id=0 --iid=1 --epochs=10
+python src/federated_main.py --model=cnn --dataset=mnist --gpu_id=0 --iid=0 --epochs=50 --lr=0.0001 --clip_value=1.0 --local_ep=10
 ```
 * To run the same experiment under non-IID condition:
 ```

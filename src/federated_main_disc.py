@@ -11,11 +11,12 @@ import numpy as np
 from tqdm import tqdm
 
 import torch
+from torch import nn
 from tensorboardX import SummaryWriter
 
 from options import args_parser
 from update import LocalUpdate, test_inference
-from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar
+from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar, CNNMnistSplit, UFODiscriminator
 from utils import get_dataset, average_weights, exp_details
 
 
@@ -25,6 +26,8 @@ if __name__ == '__main__':
     # define paths
     path_project = os.path.abspath('..')
     logger = SummaryWriter('../logs')
+    writer = SummaryWriter()
+
 
     args = args_parser()
     exp_details(args)
@@ -40,7 +43,7 @@ if __name__ == '__main__':
     if args.model == 'cnn':
         # Convolutional neural netork
         if args.dataset == 'mnist':
-            global_model = CNNMnist(args=args)
+            global_model = CNNMnistSplit(args=args)
         elif args.dataset == 'fmnist':
             global_model = CNNFashion_Mnist(args=args)
         elif args.dataset == 'cifar':
@@ -65,6 +68,9 @@ if __name__ == '__main__':
     # copy weights
     global_weights = global_model.state_dict()
 
+    # init discriminator
+    disc = UFODiscriminator(args)
+
     # Training
     train_loss, train_accuracy = [], []
     val_acc_list, net_list = [], []
@@ -73,7 +79,7 @@ if __name__ == '__main__':
     val_loss_pre, counter = 0, 0
 
     for epoch in tqdm(range(args.epochs)):
-        local_weights, local_losses = [], []
+        local_weights, local_losses, local_models, aligned_weights, aligned_losses = [], [], [], [], []
         print(f'\n | Global Training Round : {epoch+1} |\n')
 
         global_model.train()
@@ -83,18 +89,35 @@ if __name__ == '__main__':
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx], logger=logger)
-            _, w, loss= local_model.update_weights(
+            model, w, loss = local_model.update_weights(
                 model=copy.deepcopy(global_model), global_round=epoch)
             local_weights.append(copy.deepcopy(w))
             local_losses.append(copy.deepcopy(loss))
+            local_models.append(model)
+
+        # Alignment
+        disc_losses = []
+        for i, idx in enumerate(idxs_users):
+            aligned_local_model = LocalUpdate(args=args, dataset=train_dataset,
+                                      idxs=user_groups[idx], logger=logger)            
+            disc_loss = aligned_local_model.update_weights_disc(
+                model=local_models[i], idx=i, all_models=local_models, global_model=global_model,
+                disc=disc, global_round=epoch, writer=writer
+            )
+            aligned_weights.append(copy.deepcopy(w))
+            aligned_losses.append(copy.deepcopy(loss))
+            disc_losses.append(disc_loss)  # Store the discriminator loss
+
+        # After the training process, you can log the discriminator's losses or plot them if needed.
+        print('Average Discriminator Loss: {:.4f}'.format(np.mean(disc_losses)))
 
         # update global weights
-        global_weights = average_weights(local_weights)
+        global_weights = average_weights(aligned_weights)
 
         # update global weights
         global_model.load_state_dict(global_weights)
 
-        loss_avg = sum(local_losses) / len(local_losses)
+        loss_avg = sum(aligned_losses) / len(aligned_losses)
         train_loss.append(loss_avg)
 
         # Calculate avg training accuracy over all users at every epoch
@@ -142,27 +165,16 @@ if __name__ == '__main__':
     plt.plot(range(len(train_loss)), train_loss, color='r')
     plt.ylabel('Training loss')
     plt.xlabel('Communication Rounds')
-    plt.savefig('save/baseline_fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_loss.png'.
+    plt.savefig('save/fed_disc_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_loss.png'.
                 format(args.dataset, args.model, args.epochs, args.frac,
                        args.iid, args.local_ep, args.local_bs))
-    
+    #
     # # Plot Average Accuracy vs Communication rounds
     plt.figure()
     plt.title('Average Accuracy vs Communication rounds')
     plt.plot(range(len(train_accuracy)), train_accuracy, color='k')
     plt.ylabel('Average Accuracy')
     plt.xlabel('Communication Rounds')
-    plt.savefig('save/baseline_fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_acc.png'.
+    plt.savefig('save/fed_disc_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_acc.png'.
                 format(args.dataset, args.model, args.epochs, args.frac,
                        args.iid, args.local_ep, args.local_bs))
-    
-    # Plot test accuracy vs Communication rounds
-    # plt.figure()
-    # plt.title('Test Accuracy vs Communication rounds')
-    # plt.plot(range(len(train_accuracy)), [test_acc] * len(train_accuracy), color='k')
-    # plt.ylabel('Test Accuracy')
-    # plt.xlabel('Communication Rounds')
-    # plt.savefig('save/baseline_fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_test_acc.png'.
-    #             format(args.dataset, args.model, args.epochs, args.frac,
-    #                       args.iid, args.local_ep, args.local_bs))
-    
