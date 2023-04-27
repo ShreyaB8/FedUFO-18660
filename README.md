@@ -36,6 +36,8 @@ Federated experiment involves training a global model using many local models.
 * To run the federated experiment with CIFAR on CNN (IID):
 ```
 python src/federated_main.py --model=cnn --dataset=cifar --gpu=0 --iid=1 --epochs=10
+
+## Currently working command
 python src/federated_main.py --model=cnn --dataset=mnist --gpu_id=0 --iid=1 --epochs=10
 ```
 * To run the same experiment under non-IID condition:

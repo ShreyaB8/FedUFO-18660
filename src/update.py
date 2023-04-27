@@ -62,7 +62,7 @@ class LocalUpdate(object):
         # Set optimizer for the local updates
         if self.args.optimizer == 'sgd':
             optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
-                                        momentum=0.5)
+                                        momentum=0.9, weight_decay=self.args.weight_decay)
         elif self.args.optimizer == 'adam':
             optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
                                          weight_decay=1e-4)
@@ -89,6 +89,8 @@ class LocalUpdate(object):
 
         return model, model.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
+
+
     def update_weights_align(self, model, idx, all_models, global_model, disc, global_round, writer):
         for local_model in all_models:
             local_model.eval()
@@ -100,7 +102,7 @@ class LocalUpdate(object):
         # Set optimizer for the local updates
         if self.args.optimizer == 'sgd':
             optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
-                                        momentum=0.5)
+                                        momentum=0.5, weight_decay=self.args.weight_decay)
         elif self.args.optimizer == 'adam':
             optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
                                          weight_decay=1e-4)
@@ -145,14 +147,6 @@ class LocalUpdate(object):
                 batch_loss.append(loss.item())
             epoch_loss.append(sum(batch_loss)/len(batch_loss))
 
-        # Set optimizer for the local updates
-        if self.args.optimizer == 'sgd':
-            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
-                                        momentum=0.5)
-        elif self.args.optimizer == 'adam':
-            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
-                                         weight_decay=1e-4)
-
         disc.train()
         model.eval()
         disc_loss = 0
@@ -185,6 +179,15 @@ class LocalUpdate(object):
         
         kl_loss = nn.KLDivLoss(reduction="batchmean")
         kl_loss_log = nn.KLDivLoss(reduction="batchmean", log_target=True)
+
+         # Set optimizer for the local updates
+        if self.args.optimizer == 'sgd':
+            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
+                                        momentum=0.5,  weight_decay=self.args.weight_decay)
+        elif self.args.optimizer == 'adam':
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
+                                         weight_decay=1e-4)
+
         disc.eval()
         model.train()
         for iter in range(self.args.local_ep):
@@ -214,12 +217,13 @@ class LocalUpdate(object):
                 loss_comb = loss + l_uniform + loss_cgr + self.lambda_cgl * loss_cgl
                 print(f"loss: {loss.item()}, l_uniform: {l_uniform.item()}, loss_cgr: {loss_cgr.item()}, loss_cgl: {loss_cgl.item()}, loss_comb: {loss_comb.item()}")
                 loss_comb.backward()
+                # loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.args.clip_value)
                 optimizer.step()
 
         return model.state_dict(), sum(epoch_loss) / len(epoch_loss), disc_loss / len(self.trainloader)
 
-
+   
 
     def inference(self, model):
         """ Returns the inference accuracy and loss.
