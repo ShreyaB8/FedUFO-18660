@@ -119,7 +119,7 @@ class LocalUpdate(object):
                 
                 f_i = global_model.get_features(images)
                 d_hat = disc(f_i)
-                l_uniform = -torch.sum(torch.log(d_hat))
+                l_uniform = -torch.mean(torch.log(d_hat))
 
                 log_probs = model(images)
                 loss = self.criterion(log_probs, labels)
@@ -208,7 +208,7 @@ class LocalUpdate(object):
                 f_i = global_model.get_features(images)
                 gl_pred = global_model(images)
                 d_hat = disc(f_i)
-                l_uniform = -torch.sum(torch.log(d_hat))
+                l_uniform = -torch.mean(torch.log(d_hat))
 
                 log_probs = model(images)
                 loss = self.criterion(log_probs, labels)
