@@ -8,6 +8,65 @@ from torch.utils.data import DataLoader, Dataset
 import argparse
 
 
+class UADLoss(nn.Module):
+    def __init__(self, num_clients):
+        super(UADLoss, self).__init__()
+        self.num_clients = num_clients
+
+    def forward(self, t):
+        eps = 1e-7
+        batch_loss = torch.div(-1, self.num_clients) * torch.sum(torch.log(t + eps), dim=1)
+        return torch.div(batch_loss.sum(), batch_loss.shape[0])
+
+
+class DiscriminatorLoss(nn.Module):
+    def __init__(self, num_group_clients):
+        super(DiscriminatorLoss, self).__init__()
+        self.num_group_clients = num_group_clients
+
+    def forward(self, d_self, d_other):
+        eps = 1e-7
+        loss = -torch.log(d_self + eps) - torch.div(1, self.num_group_clients - 1) * \
+               torch.sum(torch.log(d_other + eps), dim=1).view(-1, 1)
+        return torch.div(loss.sum(), loss.shape[0])
+
+
+def get_clients_p(clients, num_classes):
+    num_classes = num_classes
+    total_count = Counter()
+    num = len(clients)
+    for i in range(num):
+        total_count += clients[i].num_classes_dict
+    result = []
+    for i in range(num):
+        class_frac = [0.0 for i in range(num_classes)]
+        # label is type of tensor
+        for label, count in clients[i].num_classes_dict.items():
+            class_frac[label] = count / total_count[label]
+        result.append(class_frac)
+    return np.array(result)
+
+
+def get_clients_batch_predict(X, clients, args, num_classes=10):
+    num = len(clients)
+    batch_size = args.local_bs
+    num_classes = num_classes
+    batch_predict = np.zeros((batch_size, num, num_classes))
+    for client_idx in range(num):
+        client_batch_predict = clients[client_idx].prior_model(X).cpu().detach().numpy()
+        for idx, pred in enumerate(client_batch_predict):
+            batch_predict[idx, client_idx, :] = pred
+    return batch_predict
+
+
+def get_mixed_predict(X, clients, args, num_classes=10):
+    clients_batch_predict = get_clients_batch_predict(X, clients, args, num_classes)
+    clients_p = get_clients_p(clients, num_classes)
+    result = []
+    for clients_predict in clients_batch_predict:
+        result.append(F.softmax(torch.tensor(np.sum(clients_predict * clients_p, axis=0)), dim=0).detach().tolist())
+    return torch.tensor(result)
+
 
 class DatasetSplit(Dataset):
     """An abstract Dataset class wrapped around Pytorch Dataset class.
@@ -33,7 +92,14 @@ class LocalUpdate(object):
             dataset, list(idxs))
         self.device = 'cuda' if args.gpu else 'cpu'
         # Default criterion set to NLL loss function
-        self.criterion = nn.NLLLoss().to(self.device)
+        self.criterion = nn.CrossEntropyLoss().to(self.device)
+
+        self.uad_criterion = UADLoss(num_clients=args.num_users).to(self.device)
+        
+        self.discriminator_optimizer = None
+        self.discriminator_loss = DiscriminatorLoss(num_group_clients=args.num_group_clients).to(self.device)
+        self.cgr_loss = torch.nn.KLDivLoss(reduction="mean").to(self.device)
+
         self.lambda_cgl = 2
 
     def train_val_test(self, dataset, idxs):
@@ -99,6 +165,10 @@ class LocalUpdate(object):
         global_model.eval()
         epoch_loss = []
 
+        if not self.discriminator_optimizer:
+            self.discriminator_optimizer = torch.optim.SGD(disc.parameters(), lr=self.args.lr,
+                                                       momentum=0.5, weight_decay=self.args.weight_decay)
+
         # Set optimizer for the local updates
         if self.args.optimizer == 'sgd':
             optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
@@ -107,74 +177,104 @@ class LocalUpdate(object):
             optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
                                          weight_decay=1e-4)
 
-        cross_entropy = nn.CrossEntropyLoss()
+        cross_entropy = nn.CrossEntropyLoss().to(self.device)
         
         
         lambda_val = 0.1 # to control the impact of the uniformity loss
-        for iter in range(self.args.local_ep):
-            batch_loss = []
-            for batch_idx, (images, labels) in enumerate(self.trainloader):
-                images, labels = images.to(self.device), labels.to(self.device)
-                model.zero_grad()
-                
-                f_i = global_model.get_features(images)
-                d_hat = disc(f_i)
-                l_uniform = -torch.mean(torch.log(d_hat))
-
-                log_probs = model(images)
-                loss = self.criterion(log_probs, labels)
-                loss_comb = loss + l_uniform
-                loss_comb.backward()
-                #loss = self.criterion(log_probs, labels) + l_uniform
-                #loss = self.criterion(log_probs, labels) + lambda_val * l_uniform
-               # loss_.backward()
-                
-                # Print gradients
-                for name, param in model.named_parameters():
-                    if param.grad is not None:
-                        # print(f'Gradients of {name}: {param.grad}')
-                        writer.add_histogram(f'{name}.grad', param.grad, global_round)
-
-                optimizer.step()
+        batch_loss = []
+        for batch_idx, (images, labels) in enumerate(self.trainloader):
+            data, target = images.to(self.device), labels.to(self.device)
+            model.zero_grad()
 
 
-                if self.args.verbose and (batch_idx % 10 == 0):
-                    print('| Global Round : {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                        global_round, iter, batch_idx * len(images),
-                        len(self.trainloader.dataset),
-                        100. * batch_idx / len(self.trainloader), loss.item()))
-                self.logger.add_scalar('loss', loss.item())
-                batch_loss.append(loss.item())
-            epoch_loss.append(sum(batch_loss)/len(batch_loss))
+            y_hat = model(data).to(self.device)
+            cls = cross_entropy(y_hat, target)  
+            f_self = model.get_features(images).to(self.device)
+            d_self = disc(f_self).to(self.device)
+            extractor_loss = cls + self.uad_loss(d_self)
+            extractor_loss.backward()
+            optimizer.step()
+            batch_loss.append(extractor_loss.item())
+
+            
+            #f_i = global_model.get_features(images)
+            #d_hat = disc(f_i)
+            #l_uniform = -torch.mean(torch.log(d_hat))
+#
+            # log_probs = model(images)
+            #loss = self.criterion(log_probs, labels)
+            #loss_comb = loss + l_uniform
+            #loss_comb.backward()
+            #loss = self.criterion(log_probs, labels) + l_uniform
+            #loss = self.criterion(log_probs, labels) + lambda_val * l_uniform
+            # loss_.backward()
+            
+            # Print gradients
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    # print(f'Gradients of {name}: {param.grad}')
+                    writer.add_histogram(f'{name}.grad', param.grad, global_round)
+
+            #optimizer.step()
+
+
+            if self.args.verbose and (batch_idx % 10 == 0):
+                print('| Global Round : {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                    global_round, iter, batch_idx * len(images),
+                    len(self.trainloader.dataset),
+                    100. * batch_idx / len(self.trainloader), loss.item()))
+            self.logger.add_scalar('loss', loss.item())
+            batch_loss.append(loss.item())
+        epoch_loss.append(sum(batch_loss)/len(batch_loss))
 
         disc.train()
         model.eval()
         disc_loss = 0
-        for iter in range(self.args.local_ep):
-            batch_loss = []
-            for batch_idx, (images, labels) in enumerate(self.trainloader):
-                images, labels = images.to(self.device), labels.to(self.device)
-                
-                disc.zero_grad()
-                
-                f_i = global_model.get_features(images)
-                d_hat = disc(f_i) 
+        batch_loss = []
+        for batch_idx, (images, labels) in enumerate(self.trainloader):
+            data, target = images.to(self.device), labels.to(self.device)
+            
+            disc.zero_grad()
 
-                d_tilda_loss = torch.zeros_like(d_hat[:,0])
-                for i, local_model in enumerate(all_models):
-                    d_tilda_loss += torch.log(disc(local_model.get_features(images))[:,i])
+            d_j_batch_list = []
+            for j, local_model in enumerate(all_models):
+                if j == idx:
+                    continue
+                other_model = all_models[j]
+                f_j_batch = other_model.get_features(data).to(self.device)
+                d_j_batch = disc(f_j_batch)[:, j].to(self.device)
+                d_j_batch_list.append(d_j_batch.view(1, -1))
 
-                d_tilda_loss = d_tilda_loss / (len(all_models)-1)
-                # print(d_tilda_loss.shape, d_hat[idx].shape)
-                total_loss = -torch.log(d_hat[:,idx]) - d_tilda_loss
-                disc.zero_grad()
-                total_loss.mean().backward()
-                optimizer.step()
-                # scalar_total_loss = total_loss.mean()  # or total_loss.sum()
-                # scalar_total_loss.backward()
-                # total_loss.backward()
-                # disc_loss += scalar_total_loss.item()
-                disc_loss += total_loss.mean().item()
+            y_hat = self.poster_model(data).to(self.device)
+            f_self = self.poster_model.feature.to(self.device)
+
+            self.discriminator_optimizer.zero_grad()
+            d_self = disc(f_self.detach())[:, idx].to(self.device)
+            d_j_batch = torch.cat(d_j_batch_list).T.detach().to(self.device)
+            discriminator_loss = self.discriminator_loss(d_self, d_j_batch)
+            discriminator_loss.backward()
+            batch_loss.append(discriminator_loss.item())
+            self.discriminator_optimizer.step()
+
+            
+            #f_i = global_model.get_features(images)
+            #d_hat = disc(f_i) 
+
+            #d_tilda_loss = torch.zeros_like(d_hat[:,0])
+            #for i, local_model in enumerate(all_models):
+            #    d_tilda_loss += torch.log(disc(local_model.get_features(images))[:,i])
+
+            #d_tilda_loss = d_tilda_loss / (len(all_models)-1)
+            # print(d_tilda_loss.shape, d_hat[idx].shape)
+            #total_loss = -torch.log(d_hat[:,idx]) - d_tilda_loss
+            #disc.zero_grad()
+            #total_loss.mean().backward()
+            #optimizer.step()
+            # scalar_total_loss = total_loss.mean()  # or total_loss.sum()
+            # scalar_total_loss.backward()
+            # total_loss.backward()
+            # disc_loss += scalar_total_loss.item()
+            #disc_loss += total_loss.mean().item()
 
         
         kl_loss = nn.KLDivLoss(reduction="batchmean")
@@ -190,38 +290,59 @@ class LocalUpdate(object):
 
         disc.eval()
         model.train()
+        batch_loss = []
         for iter in range(self.args.local_ep):
-            batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.trainloader):
-                images, labels = images.to(self.device), labels.to(self.device)
+                data, target = images.to(self.device), labels.to(self.device)
                 model.zero_grad()
 
-                y_cgr = torch.zeros(10,10)
-                for i, local_model in enumerate(all_models):
-                    if i == idx:
-                        continue
-                    y_cgr += local_model(images)
 
-                y_cgr_softmax = nn.functional.softmax(y_cgr, dim=1) 
+                y_wave = F.softmax(get_mixed_predict(data, all_models, self.args), dim=1).to(self.device)
+                y_hat = model(data)
+                gl_pred = global_model(data)
+                # logging.info("y_wave:"+str(y_wave))
+                # logging.info("y_hat:"+str(y_hat))
+                cgr_loss = self.cgr_loss(y_wave.log(), y_hat)
+                loss_cgl = self.cgr_loss(gl_pred.log(), y_hat)
 
-                
-                f_i = global_model.get_features(images)
-                gl_pred = global_model(images)
-                d_hat = disc(f_i)
-                l_uniform = -torch.mean(torch.log(d_hat))
+                y_hat = model(data).to(self.device)
+                cls = cross_entropy(y_hat, target)  
+                f_self = model.get_features(images).to(self.device)
+                d_self = disc(f_self).to(self.device)
+                extractor_loss = cls + self.uad_loss(d_self)
 
-                log_probs = model(images)
-                loss = self.criterion(log_probs, labels)
-                loss_cgr = kl_loss(log_probs, y_cgr_softmax)
-                loss_cgl = kl_loss_log(log_probs, gl_pred)
-                loss_comb = loss + l_uniform + loss_cgr + self.lambda_cgl * loss_cgl
-                print(f"loss: {loss.item()}, l_uniform: {l_uniform.item()}, loss_cgr: {loss_cgr.item()}, loss_cgl: {loss_cgl.item()}, loss_comb: {loss_comb.item()}")
-                loss_comb.backward()
-                # loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.args.clip_value)
+                total_loss = cgr_loss + extractor_loss + self.lambda_cgl * loss_cgl
+                batch_loss.append(total_loss.item())
+                total_loss.backward()
                 optimizer.step()
 
-        return model.state_dict(), sum(epoch_loss) / len(epoch_loss), disc_loss / len(self.trainloader)
+
+                #y_cgr = torch.zeros(10,10)
+                #for i, local_model in enumerate(all_models):
+                #    if i == idx:
+                #        continue
+                #    y_cgr += local_model(images)
+
+                #y_cgr_softmax = nn.functional.softmax(y_cgr, dim=1) 
+
+                
+                #f_i = global_model.get_features(images)
+                #gl_pred = global_model(images)
+                #d_hat = disc(f_i)
+                #l_uniform = -torch.mean(torch.log(d_hat))
+
+                #log_probs = model(images)
+                #loss = self.criterion(log_probs, labels)
+                #loss_cgr = kl_loss(log_probs, y_cgr_softmax)
+                #loss_cgl = kl_loss_log(log_probs, gl_pred)
+                #loss_comb = loss + l_uniform + loss_cgr + self.lambda_cgl * loss_cgl
+                print(f"total loss: {total_loss.item()}")
+                #loss_comb.backward()
+                # loss.backward()
+                #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.args.clip_value)
+                #optimizer.step()
+
+        return model.state_dict(), sum(batch_loss) / len(batch_loss), disc_loss / len(self.trainloader)
 
    
 
