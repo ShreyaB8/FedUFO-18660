@@ -22,10 +22,10 @@ from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar, CNNMnistSplit, UFO
 from utils import get_dataset, average_weights, exp_details
 
 def get_num_classes_dict(idx):
-    if isinstance(train_loader.dataset.targets, torch.Tensor):
-        return Counter(train_loader.dataset.targets[user_groups[idx]].detach().numpy())
+    if isinstance(train_dataset.targets, torch.Tensor):
+        return Counter(train_dataset.targets[user_groups[idx]].detach().numpy())
     else:
-        return Counter(torch.tensor(train_loader.dataset.targets)[user_groups[idx]].detach().numpy())
+        return Counter(torch.tensor(train_dataset.targets)[user_groups[idx]].detach().numpy())
 
 
 if __name__ == '__main__':
@@ -93,7 +93,7 @@ if __name__ == '__main__':
         global_model.train()
         m = max(int(args.frac * args.num_users), 1)
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
-        args["num_group_users"] = len(idxs_users)
+        args.num_group_users = len(idxs_users)
 
         num_classes_dicts = list()
         for idx_usr in idxs_users:

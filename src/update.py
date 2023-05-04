@@ -5,6 +5,8 @@
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+import numpy as np
+import torch.nn.functional as F
 import argparse
 
 from collections import Counter
@@ -96,10 +98,10 @@ class LocalUpdate(object):
         # Default criterion set to NLL loss function
         self.criterion = nn.CrossEntropyLoss().to(self.device)
 
-        self.uad_criterion = UADLoss(num_clients=args.num_users).to(self.device)
+        self.uad_loss = UADLoss(num_clients=args.num_users).to(self.device)
         
         self.discriminator_optimizer = None
-        self.discriminator_loss = DiscriminatorLoss(num_group_clients=args.num_group_clients).to(self.device)
+        self.discriminator_loss = DiscriminatorLoss(num_group_clients=args.num_group_users).to(self.device)
         self.cgr_loss = torch.nn.KLDivLoss(reduction="mean").to(self.device)
 
         self.lambda_cgl = 2
@@ -221,12 +223,12 @@ class LocalUpdate(object):
 
 
             if self.args.verbose and (batch_idx % 10 == 0):
-                print('| Global Round : {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                    global_round, iter, batch_idx * len(images),
+                print('| Global Round : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                    global_round, batch_idx * len(images),
                     len(self.trainloader.dataset),
-                    100. * batch_idx / len(self.trainloader), loss.item()))
-            self.logger.add_scalar('loss', loss.item())
-            batch_loss.append(loss.item())
+                    100. * batch_idx / len(self.trainloader), extractor_loss.item()))
+            self.logger.add_scalar('loss', extractor_loss.item())
+            batch_loss.append(extractor_loss.item())
         epoch_loss.append(sum(batch_loss)/len(batch_loss))
 
         disc.train()
@@ -247,8 +249,8 @@ class LocalUpdate(object):
                 d_j_batch = disc(f_j_batch)[:, j].to(self.device)
                 d_j_batch_list.append(d_j_batch.view(1, -1))
 
-            y_hat = self.poster_model(data).to(self.device)
-            f_self = self.poster_model.feature.to(self.device)
+            y_hat = model(data).to(self.device)
+            f_self = model.get_features(data).to(self.device)
 
             self.discriminator_optimizer.zero_grad()
             d_self = disc(f_self.detach())[:, idx].to(self.device)
