@@ -87,6 +87,10 @@ if __name__ == '__main__':
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
         args["num_group_users"] = len(idxs_users)
 
+        num_classes_dicts = list()
+        for idx_usr in idxs_users:
+            num_classes_dicts.append(user_groups[idx_usr])
+
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx], logger=logger)
@@ -102,7 +106,7 @@ if __name__ == '__main__':
             aligned_local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx], logger=logger)            
             w, loss, disc_loss = aligned_local_model.update_weights_align(
-                model=local_models[i], idx=i, all_models=local_models, global_model=global_model,
+                model=local_models[i], idx=i, all_models=local_models, num_classes_dicts=num_classes_dicts, global_model=global_model,
                 disc=disc, global_round=epoch, writer=writer
             )
             aligned_weights.append(copy.deepcopy(w))

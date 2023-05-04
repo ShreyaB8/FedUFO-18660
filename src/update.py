@@ -7,6 +7,8 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 import argparse
 
+from collections import Counter
+
 
 class UADLoss(nn.Module):
     def __init__(self, num_clients):
@@ -31,17 +33,17 @@ class DiscriminatorLoss(nn.Module):
         return torch.div(loss.sum(), loss.shape[0])
 
 
-def get_clients_p(clients, num_classes):
+def get_clients_p(num_classes_dicts, num_classes=10):
     num_classes = num_classes
     total_count = Counter()
     num = len(clients)
     for i in range(num):
-        total_count += clients[i].num_classes_dict
+        total_count += num_classes_dicts[i]
     result = []
     for i in range(num):
         class_frac = [0.0 for i in range(num_classes)]
         # label is type of tensor
-        for label, count in clients[i].num_classes_dict.items():
+        for label, count in num_classes_dicts[i].items():
             class_frac[label] = count / total_count[label]
         result.append(class_frac)
     return np.array(result)
@@ -53,15 +55,15 @@ def get_clients_batch_predict(X, clients, args, num_classes=10):
     num_classes = num_classes
     batch_predict = np.zeros((batch_size, num, num_classes))
     for client_idx in range(num):
-        client_batch_predict = clients[client_idx].prior_model(X).cpu().detach().numpy()
+        client_batch_predict = clients[client_idx](X).cpu().detach().numpy()
         for idx, pred in enumerate(client_batch_predict):
             batch_predict[idx, client_idx, :] = pred
     return batch_predict
 
 
-def get_mixed_predict(X, clients, args, num_classes=10):
+def get_mixed_predict(X, clients, num_classes_dicts, args, num_classes=10):
     clients_batch_predict = get_clients_batch_predict(X, clients, args, num_classes)
-    clients_p = get_clients_p(clients, num_classes)
+    clients_p = get_clients_p(num_classes_dicts, num_classes)
     result = []
     for clients_predict in clients_batch_predict:
         result.append(F.softmax(torch.tensor(np.sum(clients_predict * clients_p, axis=0)), dim=0).detach().tolist())
@@ -157,7 +159,7 @@ class LocalUpdate(object):
 
 
 
-    def update_weights_align(self, model, idx, all_models, global_model, disc, global_round, writer):
+    def update_weights_align(self, model, idx, all_models, num_classes_dicts, global_model, disc, global_round, writer):
         for local_model in all_models:
             local_model.eval()
         disc.eval()
@@ -297,7 +299,7 @@ class LocalUpdate(object):
                 model.zero_grad()
 
 
-                y_wave = F.softmax(get_mixed_predict(data, all_models, self.args), dim=1).to(self.device)
+                y_wave = F.softmax(get_mixed_predict(data, all_models, num_classes_dicts, self.args), dim=1).to(self.device)
                 y_hat = model(data)
                 gl_pred = global_model(data)
                 # logging.info("y_wave:"+str(y_wave))
