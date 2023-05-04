@@ -85,6 +85,7 @@ if __name__ == '__main__':
         global_model.train()
         m = max(int(args.frac * args.num_users), 1)
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
+        args["num_group_users"] = len(idxs_users)
 
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
