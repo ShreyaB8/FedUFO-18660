@@ -10,6 +10,8 @@ import pickle
 import numpy as np
 from tqdm import tqdm
 
+from collections import Counter
+
 import torch
 from torch import nn
 from tensorboardX import SummaryWriter
@@ -18,6 +20,12 @@ from options import args_parser
 from update import LocalUpdate, test_inference
 from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar, CNNMnistSplit, UFODiscriminator
 from utils import get_dataset, average_weights, exp_details
+
+def get_num_classes_dict(idx):
+    if isinstance(train_loader.dataset.targets, torch.Tensor):
+        return Counter(train_loader.dataset.targets[user_groups[idx]].detach().numpy())
+    else:
+        return Counter(torch.tensor(train_loader.dataset.targets)[user_groups[idx]].detach().numpy())
 
 
 if __name__ == '__main__':
@@ -89,7 +97,7 @@ if __name__ == '__main__':
 
         num_classes_dicts = list()
         for idx_usr in idxs_users:
-            num_classes_dicts.append(user_groups[idx_usr])
+            num_classes_dicts.append(get_num_classes_dict(idx_usr))
 
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
