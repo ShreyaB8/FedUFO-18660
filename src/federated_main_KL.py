@@ -10,6 +10,8 @@ import pickle
 import numpy as np
 from tqdm import tqdm
 
+from collections import Counter
+
 import torch
 from torch import nn
 from tensorboardX import SummaryWriter
@@ -18,6 +20,12 @@ from options import args_parser
 from update import LocalUpdate, test_inference
 from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar, CNNMnistSplit, UFODiscriminator
 from utils import get_dataset, average_weights, exp_details
+
+def get_num_classes_dict(idx):
+    if isinstance(train_dataset.targets, torch.Tensor):
+        return Counter(train_dataset.targets[user_groups[idx]].detach().numpy())
+    else:
+        return Counter(torch.tensor(train_dataset.targets)[user_groups[idx]].detach().numpy())
 
 
 if __name__ == '__main__':
@@ -69,7 +77,7 @@ if __name__ == '__main__':
     global_weights = global_model.state_dict()
 
     # init discriminator
-    disc = UFODiscriminator(args)
+    
 
     # Training
     train_loss, train_accuracy = [], []
@@ -85,6 +93,11 @@ if __name__ == '__main__':
         global_model.train()
         m = max(int(args.frac * args.num_users), 1)
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
+        args.num_group_users = len(idxs_users)
+
+        num_classes_dicts = list()
+        for idx_usr in idxs_users:
+            num_classes_dicts.append(get_num_classes_dict(idx_usr))
 
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
@@ -96,20 +109,21 @@ if __name__ == '__main__':
             local_models.append(model)
 
         # Alignment
-        # disc_losses = []
+        disc_losses = []
         for i, idx in enumerate(idxs_users):
+            disc = UFODiscriminator(args)
             aligned_local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx], logger=logger)            
-            w, loss, _ = aligned_local_model.update_weights_align_KL(
-                model=local_models[i], idx=i, all_models=local_models, global_model=global_model,
+            w, loss, disc_loss = aligned_local_model.update_weights_align_KL(
+                model=local_models[i], idx=i, all_models=local_models,  num_classes_dicts=num_classes_dicts, global_model=global_model,
                 disc=disc, global_round=epoch, writer=writer
             )
             aligned_weights.append(copy.deepcopy(w))
             aligned_losses.append(copy.deepcopy(loss))
-            # disc_losses.append(disc_loss)  # Store the discriminator loss
+            disc_losses.append(disc_loss)  # Store the discriminator loss
 
         # After the training process, you can log the discriminator's losses or plot them if needed.
-        # print('Average Discriminator Loss: {:.4f}'.format(np.mean(disc_losses)))
+        print('Average Discriminator Loss: {:.4f}'.format(np.mean(disc_losses)))
 
         # update global weights
         global_weights = average_weights(aligned_weights)
@@ -145,12 +159,12 @@ if __name__ == '__main__':
     print("|---- Test Accuracy: {:.2f}%".format(100*test_acc))
 
     # Saving the objects train_loss and train_accuracy:
-    file_name = 'save/objects/{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}].pkl'.\
+    file_name = 'save/objects/KL_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}].pkl'.\
         format(args.dataset, args.model, args.epochs, args.frac, args.iid,
                args.local_ep, args.local_bs)
 
     with open(file_name, 'wb') as f:
-        pickle.dump([train_loss, train_accuracy], f)
+        pickle.dump([train_loss, train_accuracy, test_acc], f)
 
     print('\n Total Run Time: {0:0.4f}'.format(time.time()-start_time))
 

@@ -38,7 +38,7 @@ class DiscriminatorLoss(nn.Module):
 def get_clients_p(num_classes_dicts, num_classes=10):
     num_classes = num_classes
     total_count = Counter()
-    num = len(clients)
+    num = len(num_classes_dicts)
     for i in range(num):
         total_count += num_classes_dicts[i]
     result = []
@@ -102,7 +102,7 @@ class LocalUpdate(object):
         
         self.discriminator_optimizer = None
         self.discriminator_loss = DiscriminatorLoss(num_group_clients=args.num_group_users).to(self.device)
-        self.cgr_loss = torch.nn.KLDivLoss(reduction="mean").to(self.device)
+        self.cgr_loss = torch.nn.KLDivLoss(reduction="batchmean", log_target = True).to(self.device)
 
         self.lambda_cgl = 2
 
@@ -162,6 +162,7 @@ class LocalUpdate(object):
 
 
     def update_weights_align(self, model, idx, all_models, num_classes_dicts, global_model, disc, global_round, writer):
+        epsilon = 1e-8
         for local_model in all_models:
             local_model.eval()
         disc.eval()
@@ -306,8 +307,9 @@ class LocalUpdate(object):
                 gl_pred = global_model(data)
                 # logging.info("y_wave:"+str(y_wave))
                 # logging.info("y_hat:"+str(y_hat))
-                cgr_loss = self.cgr_loss(y_wave.log(), y_hat)
-                loss_cgl = self.cgr_loss(gl_pred.log(), y_hat)
+                cgr_loss = self.cgr_loss(torch.log(y_wave + epsilon), y_hat)
+                loss_cgl = self.cgr_loss(gl_pred, y_hat)
+                
 
                 y_hat = model(data).to(self.device)
                 cls = cross_entropy(y_hat, target)  
@@ -319,6 +321,7 @@ class LocalUpdate(object):
                 batch_loss.append(total_loss.item())
                 total_loss.backward()
                 optimizer.step()
+                print(f"total loss: {total_loss.item()}, cgr loss: {cgr_loss.item()}, extractor loss: {extractor_loss.item()}, cgl loss: {loss_cgl.item()}")
 
 
                 #y_cgr = torch.zeros(10,10)
@@ -340,7 +343,7 @@ class LocalUpdate(object):
                 #loss_cgr = kl_loss(log_probs, y_cgr_softmax)
                 #loss_cgl = kl_loss_log(log_probs, gl_pred)
                 #loss_comb = loss + l_uniform + loss_cgr + self.lambda_cgl * loss_cgl
-                print(f"total loss: {total_loss.item()}")
+                #cgr_loss + extractor_loss + self.lambda_cgl * loss_cgl
                 #loss_comb.backward()
                 # loss.backward()
                 #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.args.clip_value)
@@ -348,45 +351,138 @@ class LocalUpdate(object):
 
         return model.state_dict(), sum(batch_loss) / len(batch_loss), disc_loss / len(self.trainloader)
 
-    def update_weights_disc(self, model, idx, all_models, global_model, disc, global_round, writer):
+    def update_weights_disc(self, model, idx, all_models, num_classes_dicts, global_model, disc, global_round, writer):
+        epsilon = 1e-8
         for local_model in all_models:
             local_model.eval()
-        disc.train()
-        model.eval()
+        disc.eval()
+        model.train()
+        global_model.eval()
         epoch_loss = []
 
-        optimizer = torch.optim.Adam(disc.parameters(), lr=self.args.lr, weight_decay=1e-4)
+        if not self.discriminator_optimizer:
+            self.discriminator_optimizer = torch.optim.SGD(disc.parameters(), lr=self.args.lr,
+                                                       momentum=0.5, weight_decay=self.args.weight_decay)
 
+        # Set optimizer for the local updates
+        if self.args.optimizer == 'sgd':
+            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
+                                        momentum=0.5, weight_decay=self.args.weight_decay)
+        elif self.args.optimizer == 'adam':
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
+                                         weight_decay=1e-4)
+
+        cross_entropy = nn.CrossEntropyLoss().to(self.device)
+        
+        
+        lambda_val = 0.1 # to control the impact of the uniformity loss
+        batch_loss = []
+        for batch_idx, (images, labels) in enumerate(self.trainloader):
+            data, target = images.to(self.device), labels.to(self.device)
+            model.zero_grad()
+
+
+            y_hat = model(data).to(self.device)
+            cls = cross_entropy(y_hat, target)  
+            f_self = model.get_features(images).to(self.device)
+            d_self = disc(f_self).to(self.device)
+            extractor_loss = cls + self.uad_loss(d_self)
+            extractor_loss.backward()
+            optimizer.step()
+            batch_loss.append(extractor_loss.item())
+
+            
+            #f_i = global_model.get_features(images)
+            #d_hat = disc(f_i)
+            #l_uniform = -torch.mean(torch.log(d_hat))
+#
+            # log_probs = model(images)
+            #loss = self.criterion(log_probs, labels)
+            #loss_comb = loss + l_uniform
+            #loss_comb.backward()
+            #loss = self.criterion(log_probs, labels) + l_uniform
+            #loss = self.criterion(log_probs, labels) + lambda_val * l_uniform
+            # loss_.backward()
+            
+            # Print gradients
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    # print(f'Gradients of {name}: {param.grad}')
+                    writer.add_histogram(f'{name}.grad', param.grad, global_round)
+
+            #optimizer.step()
+
+
+            if self.args.verbose and (batch_idx % 10 == 0):
+                print('| Global Round : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                    global_round, batch_idx * len(images),
+                    len(self.trainloader.dataset),
+                    100. * batch_idx / len(self.trainloader), extractor_loss.item()))
+            self.logger.add_scalar('loss', extractor_loss.item())
+            batch_loss.append(extractor_loss.item())
+        epoch_loss.append(sum(batch_loss)/len(batch_loss))
+
+        disc.train()
+        model.eval()
+        disc_loss = 0
+        batch_loss = []
+        for batch_idx, (images, labels) in enumerate(self.trainloader):
+            data, target = images.to(self.device), labels.to(self.device)
+            
+            disc.zero_grad()
+
+            d_j_batch_list = []
+            for j, local_model in enumerate(all_models):
+                if j == idx:
+                    continue
+                other_model = all_models[j]
+                f_j_batch = other_model.get_features(data).to(self.device)
+                d_j_batch = disc(f_j_batch)[:, j].to(self.device)
+                d_j_batch_list.append(d_j_batch.view(1, -1))
+
+            y_hat = model(data).to(self.device)
+            f_self = model.get_features(data).to(self.device)
+
+            self.discriminator_optimizer.zero_grad()
+            d_self = disc(f_self.detach())[:, idx].to(self.device)
+            d_j_batch = torch.cat(d_j_batch_list).T.detach().to(self.device)
+            discriminator_loss = self.discriminator_loss(d_self, d_j_batch)
+            discriminator_loss.backward()
+            batch_loss.append(discriminator_loss.item())
+            self.discriminator_optimizer.step()
+        if self.args.optimizer == 'sgd':
+            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
+                                        momentum=0.5,  weight_decay=self.args.weight_decay)
+        elif self.args.optimizer == 'adam':
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
+                                         weight_decay=1e-4)
+
+        disc.eval()
+        model.train()
+        batch_loss = []
         for iter in range(self.args.local_ep):
-            batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.trainloader):
-                images, labels = images.to(self.device), labels.to(self.device)
+                data, target = images.to(self.device), labels.to(self.device)
+                model.zero_grad()
 
-                disc.zero_grad()
+                y_hat = model(data).to(self.device)
+                cls = cross_entropy(y_hat, target)  
+                f_self = model.get_features(images).to(self.device)
+                d_self = disc(f_self).to(self.device)
+                extractor_loss = cls + self.uad_loss(d_self)
 
-                f_i = global_model.get_features(images)
-                d_hat = disc(f_i)
-
-                d_tilda_loss = torch.zeros_like(d_hat[:,0])
-                for i, local_model in enumerate(all_models):
-                    if i == idx:
-                        continue
-                    d_tilda_loss += torch.log(disc(local_model.get_features(images))[:,i])
-
-                d_tilda_loss = d_tilda_loss / (len(all_models)-1)
-                total_loss = -torch.log(d_hat[:,idx]) - d_tilda_loss
-                disc.zero_grad()
-                total_loss.mean().backward()
+                total_loss = extractor_loss
+                batch_loss.append(total_loss.item())
+                total_loss.backward()
                 optimizer.step()
+                print(f"total loss: {total_loss.item()}")
 
-                disc_loss = total_loss.mean().item()
-                batch_loss.append(disc_loss)
-            epoch_loss.append(sum(batch_loss)/len(batch_loss))
 
-        return sum(epoch_loss) / len(epoch_loss)
+        return model.state_dict(), sum(batch_loss) / len(batch_loss), disc_loss / len(self.trainloader)
 
     
-    def update_weights_align_KL(self, model, idx, all_models, global_model, disc, global_round, writer):
+    def update_weights_align_KL(self, model, idx, all_models, num_classes_dicts, global_model, disc, global_round, writer):
+        epsilon = 1e-8
         for local_model in all_models:
             local_model.eval()
         disc.eval()
@@ -402,44 +498,39 @@ class LocalUpdate(object):
             optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
                                         weight_decay=1e-4)
 
-        kl_loss = nn.KLDivLoss(reduction="batchmean")
+        cross_entropy = nn.CrossEntropyLoss().to(self.device)
 
+        model.train()
+        batch_loss = []
         for iter in range(self.args.local_ep):
-            batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.trainloader):
-                images, labels = images.to(self.device), labels.to(self.device)
+                data, target = images.to(self.device), labels.to(self.device)
                 model.zero_grad()
 
-                y_cgr = torch.zeros(10, 10)
-                for i, local_model in enumerate(all_models):
-                    if i == idx:
-                        continue
-                    y_cgr += local_model(images)
 
-                y_cgr_softmax = nn.functional.softmax(y_cgr, dim=1)
+                y_wave = F.softmax(get_mixed_predict(data, all_models, num_classes_dicts, self.args), dim=1).to(self.device)
+                y_hat = model(data)
+                gl_pred = global_model(data)
+                # logging.info("y_wave:"+str(y_wave))
+                # logging.info("y_hat:"+str(y_hat))
+                cgr_loss = self.cgr_loss(torch.log(y_wave + epsilon), y_hat)
+                loss_cgl = self.cgr_loss(gl_pred, y_hat)
+                
 
-                log_probs = model(images)
-                loss = kl_loss(log_probs, y_cgr_softmax)
-                loss.backward()
+                y_hat = model(data).to(self.device)
+                cls = cross_entropy(y_hat, target)  
+                # f_self = model.get_features(images).to(self.device)
+                # d_self = disc(f_self).to(self.device)
+                # extractor_loss = cls + self.uad_loss(d_self)
 
-                # Print gradients
-                for name, param in model.named_parameters():
-                    if param.grad is not None:
-                        # print(f'Gradients of {name}: {param.grad}')
-                        writer.add_histogram(f'{name}.grad', param.grad, global_round)
-
+                total_loss = cgr_loss + cls + self.lambda_cgl * loss_cgl
+                batch_loss.append(total_loss.item())
+                total_loss.backward()
                 optimizer.step()
+                print(f"total loss: {total_loss.item()}, cgr loss: {cgr_loss.item()}, extractor loss: {cls.item()}, cgl loss: {loss_cgl.item()}")
 
-                if self.args.verbose and (batch_idx % 10 == 0):
-                    print('| Global Round : {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                        global_round, iter, batch_idx * len(images),
-                        len(self.trainloader.dataset),
-                        100. * batch_idx / len(self.trainloader), loss.item()))
-                self.logger.add_scalar('loss', loss.item())
-                batch_loss.append(loss.item())
-            epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
-        return model.state_dict(), sum(epoch_loss) / len(epoch_loss), None
+        return model.state_dict(), sum(batch_loss) / len(batch_loss), 0
 
 
     def inference(self, model):

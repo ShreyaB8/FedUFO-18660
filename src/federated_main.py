@@ -77,7 +77,7 @@ if __name__ == '__main__':
     global_weights = global_model.state_dict()
 
     # init discriminator
-    disc = UFODiscriminator(args)
+    
 
     # Training
     train_loss, train_accuracy = [], []
@@ -111,6 +111,7 @@ if __name__ == '__main__':
         # Alignment
         disc_losses = []
         for i, idx in enumerate(idxs_users):
+            disc = UFODiscriminator(args)
             aligned_local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx], logger=logger)            
             w, loss, disc_loss = aligned_local_model.update_weights_align(
@@ -163,7 +164,7 @@ if __name__ == '__main__':
                args.local_ep, args.local_bs)
 
     with open(file_name, 'wb') as f:
-        pickle.dump([train_loss, train_accuracy], f)
+        pickle.dump([train_loss, train_accuracy, test_acc], f)
 
     print('\n Total Run Time: {0:0.4f}'.format(time.time()-start_time))
 
