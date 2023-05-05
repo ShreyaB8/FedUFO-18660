@@ -23,7 +23,8 @@ from utils import get_dataset, average_weights, exp_details
 
 def get_num_classes_dict(idx):
     if isinstance(train_dataset.targets, torch.Tensor):
-        return Counter(train_dataset.targets[user_groups[idx]].detach().numpy())
+        
+        return Counter(train_dataset.targets[list(user_groups[idx])].detach().numpy())
     else:
         return Counter(torch.tensor(train_dataset.targets)[user_groups[idx]].detach().numpy())
 
